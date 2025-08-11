@@ -9,10 +9,15 @@ const server = Bun.serve({
         return new Response("WebSocket upgrade failed", { status: 400 });
     },
     websocket: {
-        open(ws) {
+        async open(ws) {
             console.log("📡 New client connected");
             clients.add(ws);
-            ws.send("✅ Connected to real-time DB updates");
+            const result = await pg.query("SELECT fn_latest_cashier_available($1) AS data", [4]);
+            const jsonResponse = result.rows[0].data;
+            ws.send(JSON.stringify({
+                data: jsonResponse
+            }));
+            // ws.send("✅ Connected to real-time DB updates");
         },
         close(ws) {
             console.log("❌ Client disconnected");
