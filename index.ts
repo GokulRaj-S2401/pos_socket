@@ -1,8 +1,8 @@
 import { Client } from "pg";
 
-const clients = new Set();
+const clients = new Map(); // Map<WebSocket, shopid>
 
-// WebSocket server setup
+// Setup Bun WebSocket server
 const server = Bun.serve({
     port: 9080,
     fetch(req, server) {
@@ -12,8 +12,6 @@ const server = Bun.serve({
     websocket: {
         open(ws) {
             console.log("📡 New client connected");
-            clients.add(ws);
-            // ws.send("✅ Connected to real-time DB updates");
         },
         close(ws) {
             console.log("❌ Client disconnected");
@@ -22,17 +20,18 @@ const server = Bun.serve({
         message(ws, message) {
             console.log(`💬 Client message: ${message}`);
             try {
-                // Parse the incoming message to get the clientId
                 const { clientId } = JSON.parse(message);
-
                 if (clientId) {
-                    // Call the database query with the clientId from the WebSocket message
-                    queryDatabaseAndNotifyClients(clientId);
+                    clients.set(ws, clientId); // Associate this socket with shopid (clientId)
+                    console.log(`🔗 Client registered with shopid: ${clientId}`);
+
+                    // Send initial data for this client/shopid
+                    queryDatabaseAndNotifyClients(clientId, ws);
                 } else {
-                    console.error("Client ID not provided in message");
+                    console.error("⚠️ Client ID (shopid) not provided in message");
                 }
             } catch (error) {
-                console.error("Error parsing client message:", error);
+                console.error("❌ Error parsing client message:", error);
             }
         },
     },
@@ -50,37 +49,54 @@ const pg = new Client({
 
 await pg.connect();
 
-// Start listening to PostgreSQL notifications on the items_channel
+// Listen to PostgreSQL NOTIFY events on the 'items_channel'
 await pg.query("LISTEN items_channel");
 
-// Listen for notifications from PostgreSQL
+// Listen for NOTIFY events
 pg.on("notification", async(msg) => {
     console.log("🛎️ PostgreSQL NOTIFY received:", msg.payload);
-    // Send the notification to all connected WebSocket clients
-    for (const client of clients) {
-        client.send(JSON.stringify({
-            payload: msg.payload,
-        }));
+    try {
+        const { shopid, operation, data } = JSON.parse(msg.payload);
+
+        for (const [client, subscribedShopId] of clients.entries()) {
+            if (parseInt(subscribedShopId, 10) === shopid) {
+                client.send(
+                    JSON.stringify({
+                        payload: `🔄 Update for shopid ${shopid}`,
+                        operation,
+                        data,
+                    })
+                );
+            }
+        }
+    } catch (error) {
+        console.error("❌ Error parsing PostgreSQL notification:", error);
     }
 });
 
 console.log("📡 Listening for PostgreSQL notifications...");
 
-// Function to query the database with the clientId and send data to connected clients
-async function queryDatabaseAndNotifyClients(clientId) {
+// Function to fetch initial data from DB and notify relevant clients
+async function queryDatabaseAndNotifyClients(shopid, specificClient = null) {
     try {
-        console.log('clientid', clientId)
-        const result = await pg.query("SELECT fn_latest_cashier_available($1) AS data", [clientId]);
+        const result = await pg.query(
+            "SELECT fn_latest_cashier_available($1) AS data", [shopid]
+        );
         const jsonResponse = result.rows[0].data;
 
-        // Send the data to all connected WebSocket clients
-        for (const client of clients) {
-            client.send(JSON.stringify({
-                payload: `Data for client ${clientId}`,
-                data: jsonResponse,
-            }));
+        for (const [client, subscribedShopId] of clients.entries()) {
+            if (parseInt(subscribedShopId, 10) === shopid) {
+                if (!specificClient || specificClient === client) {
+                    client.send(
+                        JSON.stringify({
+                            payload: `📤 Initial data for shopid ${shopid}`,
+                            data: jsonResponse,
+                        })
+                    );
+                }
+            }
         }
     } catch (error) {
-        console.error("Error querying database:", error);
+        console.error("❌ Error querying database:", error);
     }
 }
