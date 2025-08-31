@@ -1,6 +1,6 @@
 import { Client } from "pg";
 
-const clients = new Map(); // Map<WebSocket, shopid>
+const clients = new Map(); // Map<WebSocket, clientId>
 
 // Setup Bun WebSocket server
 const server = Bun.serve({
@@ -22,13 +22,13 @@ const server = Bun.serve({
             try {
                 const { clientId } = JSON.parse(message);
                 if (clientId) {
-                    clients.set(ws, clientId); // Associate this socket with shopid (clientId)
-                    console.log(`🔗 Client registered with shopid: ${clientId}`);
+                    clients.set(ws, clientId); // Associate this socket with clientId
+                    console.log(`🔗 Client registered with clientId: ${clientId}`);
 
-                    // Send initial data for this client/shopid
+                    // Send initial data for this client
                     queryDatabaseAndNotifyClients(clientId, ws);
                 } else {
-                    console.error("⚠️ Client ID (shopid) not provided in message");
+                    console.error("⚠️ clientId not provided in message");
                 }
             } catch (error) {
                 console.error("❌ Error parsing client message:", error);
@@ -37,7 +37,7 @@ const server = Bun.serve({
     },
 });
 
-console.log("🚀 WebSocket server listening on ws://localhost:9000");
+console.log("🚀 WebSocket server listening on ws://localhost:9080");
 
 // PostgreSQL client setup
 const pg = new Client({
@@ -60,13 +60,15 @@ pg.on("notification", async(msg) => {
 
         for (const [client, subscribedShopId] of clients.entries()) {
             if (parseInt(subscribedShopId, 10) === shopid) {
-                client.send(
-                    JSON.stringify({
-                        payload: `🔄 Update for shopid ${shopid}`,
-                        operation,
-                        data,
-                    })
-                );
+                if (client.readyState === 1) { // WebSocket.OPEN === 1
+                    client.send(
+                        JSON.stringify({
+                            payload: `🔄 Update for shopid ${shopid}`,
+                            operation,
+                            data,
+                        })
+                    );
+                }
             }
         }
     } catch (error) {
@@ -76,7 +78,7 @@ pg.on("notification", async(msg) => {
 
 console.log("📡 Listening for PostgreSQL notifications...");
 
-// Function to fetch initial data from DB and notify relevant clients
+// Function to fetch initial or periodic data from DB and notify relevant clients
 async function queryDatabaseAndNotifyClients(shopid, specificClient = null) {
     try {
         const result = await pg.query(
@@ -85,14 +87,16 @@ async function queryDatabaseAndNotifyClients(shopid, specificClient = null) {
         const jsonResponse = result.rows[0].data;
 
         for (const [client, subscribedShopId] of clients.entries()) {
-            if (parseInt(subscribedShopId, 10) === shopid) {
+            if (parseInt(subscribedShopId, 10) === parseInt(shopid, 10)) {
                 if (!specificClient || specificClient === client) {
-                    client.send(
-                        JSON.stringify({
-                            payload: `📤 Initial data for shopid ${shopid}`,
-                            data: jsonResponse,
-                        })
-                    );
+                    if (client.readyState === 1) {
+                        client.send(
+                            JSON.stringify({
+                                payload: `📤 Data for shopid ${shopid}`,
+                                data: jsonResponse,
+                            })
+                        );
+                    }
                 }
             }
         }
@@ -100,3 +104,12 @@ async function queryDatabaseAndNotifyClients(shopid, specificClient = null) {
         console.error("❌ Error querying database:", error);
     }
 }
+
+// 🔁 Periodic 5-second updates to each client
+setInterval(async() => {
+    for (const [client, clientId] of clients.entries()) {
+        if (client.readyState === 1) {
+            await queryDatabaseAndNotifyClients(clientId, client);
+        }
+    }
+}, 5000);
