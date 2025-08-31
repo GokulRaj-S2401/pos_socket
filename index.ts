@@ -1,8 +1,8 @@
 import { Client } from "pg";
 
-const clients = new Set();
+// Map to track which clientId is associated with which WebSocket
+const clients = new Map(); // Map<WebSocket, clientId>
 
-// WebSocket server setup
 const server = Bun.serve({
     port: 9080,
     fetch(req, server) {
@@ -12,33 +12,30 @@ const server = Bun.serve({
     websocket: {
         open(ws) {
             console.log("📡 New client connected");
-            clients.add(ws);
-            // ws.send("✅ Connected to real-time DB updates");
         },
         close(ws) {
             console.log("❌ Client disconnected");
-            clients.delete(ws);
+            clients.delete(ws); // Remove client from map on disconnect
         },
         message(ws, message) {
             console.log(`💬 Client message: ${message}`);
             try {
-                // Parse the incoming message to get the clientId
                 const { clientId } = JSON.parse(message);
 
                 if (clientId) {
-                    // Call the database query with the clientId from the WebSocket message
-                    queryDatabaseAndNotifyClients(clientId);
+                    clients.set(ws, clientId); // Associate this WebSocket with the clientId
+                    queryDatabaseAndNotifyClient(ws, clientId); // Send initial data
                 } else {
-                    console.error("Client ID not provided in message");
+                    console.error("❗ Client ID not provided in message");
                 }
             } catch (error) {
-                console.error("Error parsing client message:", error);
+                console.error("❗ Error parsing client message:", error);
             }
         },
     },
 });
 
-console.log("🚀 WebSocket server listening on ws://localhost:9000");
+console.log("🚀 WebSocket server listening on ws://localhost:9080");
 
 // PostgreSQL client setup
 const pg = new Client({
@@ -53,34 +50,43 @@ await pg.connect();
 // Start listening to PostgreSQL notifications on the items_channel
 await pg.query("LISTEN items_channel");
 
-// Listen for notifications from PostgreSQL
-pg.on("notification", async(msg) => {
+// Listen for PostgreSQL NOTIFY messages
+pg.on("notification", async (msg) => {
     console.log("🛎️ PostgreSQL NOTIFY received:", msg.payload);
-    // Send the notification to all connected WebSocket clients
-    for (const client of clients) {
-        client.send(JSON.stringify({
-            payload: msg.payload,
-        }));
+
+    try {
+        const payload = JSON.parse(msg.payload);
+        const clientIdFromDb = payload?.clientId;
+
+        // Send to only matching clients
+        for (const [ws, clientId] of clients.entries()) {
+            if (clientId === clientIdFromDb) {
+                ws.send(JSON.stringify({
+                    payload: `Notification for client ${clientId}`,
+                    data: payload,
+                }));
+            }
+        }
+    } catch (err) {
+        console.error("❗ Error handling PostgreSQL notification:", err);
     }
 });
 
 console.log("📡 Listening for PostgreSQL notifications...");
 
-// Function to query the database with the clientId and send data to connected clients
-async function queryDatabaseAndNotifyClients(clientId) {
+// Query the database with the clientId and send data to the specific client
+async function queryDatabaseAndNotifyClient(ws, clientId) {
     try {
-        console.log('clientid', clientId)
+        console.log("🔍 Querying database for clientId:", clientId);
+
         const result = await pg.query("SELECT fn_latest_cashier_available($1) AS data", [clientId]);
         const jsonResponse = result.rows[0].data;
 
-        // Send the data to all connected WebSocket clients
-        for (const client of clients) {
-            client.send(JSON.stringify({
-                payload: `Data for client ${clientId}`,
-                data: jsonResponse,
-            }));
-        }
+        ws.send(JSON.stringify({
+            payload: `Data for client ${clientId}`,
+            data: jsonResponse,
+        }));
     } catch (error) {
-        console.error("Error querying database:", error);
+        console.error("❗ Error querying database:", error);
     }
 }
